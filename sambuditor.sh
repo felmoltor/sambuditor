@@ -13,7 +13,7 @@ null_user=0
 ############
 # GLOBALES #
 ############
-RESULT_DIR="/tmp/busca_shares_ESI15_CORITEL"   # Directorio donde se guardaran los LOGS
+RESULT_DIR="/tmp/busca_shares"   # Directorio donde se guardaran los LOGS
 MATCHES_DIR=$RESULT_DIR"/Matches"
 COPY_MATCHES=1      # Guardamos los ficheros donde hay matches
 FIND_READABLES=1
@@ -82,7 +82,6 @@ then
         echo "$target_ip has $n_shares shared disk."
         if [[ $n_shares > 0 ]]
         then
-            # echo "$target_ip" > $target_ip.shares.txt
             if [[ $null_user = 1 ]]
             then
                 echo "Listing $target_ip shares with Null user..."
@@ -124,62 +123,55 @@ then
                     echo "$to_mount was successfuly mounted. Listing files in this share..."
                     cd $tmpshare 
              
-                    # ESMCLUSCAC1$
-                    if [[ "$to_mount" == *"ESMCLUSCAC1$"* ]]
+                    if [[ $FIND_READABLES == 1 ]]
                     then
-                        echo "ESMCLUSCAC1 encontrado. No operamos con el. Tarda mucho".
-                    else
-                        if [[ $FIND_READABLES == 1 ]]
-                        then
-                            # Buscamos cualquier fichero con permisos de lectura para cualquiera
-                            find . -type f -perm /u+r -maxdepth $FIND_DEEP >> $RESULT_DIR"/"$sharepath.shares.readable.txt
-                            n_ficheros_legibles=$(cat $RESULT_DIR"/"$sharepath.shares.readable.txt | wc -l)
-                            echo "There are '$n_ficheros_legibles' readable files in '$to_mount'. (Maximum search deep is $FIND_DEEP)"
-                            # Si hay ficheros legibles hacemos el grep en busca de "passw|contrase"
+                        # Buscamos cualquier fichero con permisos de lectura para cualquiera
+                        find . -type f -perm /u+r -maxdepth $FIND_DEEP >> $RESULT_DIR"/"$sharepath.shares.readable.txt
+                        n_ficheros_legibles=$(cat $RESULT_DIR"/"$sharepath.shares.readable.txt | wc -l)
+                        echo "There are '$n_ficheros_legibles' readable files in '$to_mount'. (Maximum search deep is $FIND_DEEP)"
+                        # Si hay ficheros legibles hacemos el grep en busca de "passw|contrase"
                             
-                            if [[ $n_ficheros_legibles > 0 ]]
+                        if [[ $n_ficheros_legibles > 0 ]]
+                        then
+                            if [[ $JUICY_SEARCH == 1 ]]
                             then
-                                if [[ $JUICY_SEARCH == 1 ]]
+                                echo "Looking in $to_mount the expresion '$search_regexp'..."
+                                grep -iElr "$search_regexp" -r . >> $RESULT_DIR"/"$sharepath.shares.matches.txt
+                                # Si el grep encuentra algo devuelve 0
+                                if [[ "$?" -eq "0" ]]
                                 then
-                                    echo "Looking in $to_mount the expresion '$search_regexp'..."
-                                    grep -iElr "$search_regexp" -r . >> $RESULT_DIR"/"$sharepath.shares.matches.txt
-                                    # Si el grep encuentra algo devuelve 0
-                                    if [[ "$?" -eq "0" ]]
+                                    echo "Matches were found in the folowing files: "
+                                    cat $RESULT_DIR"/"$sharepath.shares.matches.txt
+                                    # Si el directorio donde guardar los ficheros no existe, lo creamos
+                                    dirmatches_share=$MATCHES_DIR"/"$sharepath 
+                                    if [[ ! -d $dirmatches_share ]]
                                     then
-                                        echo "Matches were found in the folowing files: "
-                                        cat $RESULT_DIR"/"$sharepath.shares.matches.txt
-                                        # Si el directorio donde guardar los ficheros no existe, lo creamos
-                                        dirmatches_share=$MATCHES_DIR"/"$sharepath 
-                                        if [[ ! -d $dirmatches_share ]]
-                                        then
-                                            mkdir -p $dirmatches_share
-
-                                        fi
-
-                                        # Para cada fichero que concuerda, hacemos una copia si su tamanno es pequeño (< 700 kB)
-                                        for matched_file in `cat $RESULT_DIR"/"$sharepath.shares.matches.txt`
-                                        do
-                                            if [[ $(stat -c%s "$matched_file") -lt 716800 ]]
-                                            then
-                                                echo "Copying '$matched_file' to $dirmatches_share"
-                                                cp $matched_file $dirmatches_share
-                                            else
-                                                echo "Sice of $matched_file reach the size limit to automaticaly copy it. It's not copied to $dirmatches_share"
-                                            fi
-                                        done
-                                    else
-                                        echo "No matches were found in $to_mount"
+                                        mkdir -p $dirmatches_share
                                     fi
+
+                                    # Para cada fichero que concuerda, hacemos una copia si su tamanno es pequeño (< 700 kB)
+                                    for matched_file in `cat $RESULT_DIR"/"$sharepath.shares.matches.txt`
+                                    do
+                                        if [[ $(stat -c%s "$matched_file") -lt 716800 ]]
+                                        then
+                                            echo "Copying '$matched_file' to $dirmatches_share"
+                                            cp $matched_file $dirmatches_share
+                                        else
+                                            echo "Sice of $matched_file reach the size limit to automaticaly copy it. It's not copied to $dirmatches_share"
+                                        fi
+                                    done
                                 else
-                                    echo "We are not doing search of 'juicy files'"
-                                fi # Del Juicy Search
+                                    echo "No matches were found in $to_mount"
+                                fi
                             else
-                                echo "There are no readable files in $to_mount for this user"
-                            fi
+                                echo "We are not doing search of 'juicy files'"
+                            fi # Del Juicy Search
                         else
-                            echo "We are not looking for readable files in $to_mount"
-                        fi # Del FIND_READABLES
-                    fi # Si el share no es ESMCLUSCAC1$
+                            echo "There are no readable files in $to_mount for this user"
+                        fi
+                    else
+                        echo "We are not looking for readable files in $to_mount"
+                    fi # Del FIND_READABLES
 
                     cd $RESULT_DIR
                     # Desmontamos share
