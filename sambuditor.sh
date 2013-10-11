@@ -2,24 +2,93 @@
 
 # Listar unidades de los shares e intenta conectar con el usuario nulo
 
+# TODO: Ya que estamos repasando todas las unidades de los discos compartidos, podriamos sacar estadisticas de los tipos de ficheros que estan almacenando los usuarios. Por informacion para presentar en las reuniones
+
 ip_list=$1
-search_regexp=$5
 domain=$2
 user=$3
 password=$4
 domain_user=$domain"\\"$user
 null_user=0
 
-############
-# GLOBALES #
-############
-RESULT_DIR="/tmp/busca_shares"   # Directorio donde se guardaran los LOGS
+###############
+# CONFIG VARS #
+###############
+
+RESULT_DIR="/tmp/sambuditor"        # Directorio donde se guardaran los LOGS
 MATCHES_DIR=$RESULT_DIR"/Matches"
-COPY_MATCHES=1      # Guardamos los ficheros donde hay matches
+MAX_COPY_FILE_BYTES=716800                  # 700 KB
+COPY_MATCHES=1                              # Donde se guardan los ficheros donde hay matches
 FIND_READABLES=1
 FIND_WRITABLES=0
-FIND_DEEP=4
+FIND_DEEP=3
 JUICY_SEARCH=1
+MAX_JUICY_SEARCH_FILESIZE=2097152           # 2MB. 0 = No size limit
+FILETYPE_BLACK_LIST="exe,dll,rar,zip,7z,png,jpg,jpeg,bmp,tiff,tif,gif,ppm,pgm,svg,pam,log"
+SEARCH_REGEXP="pwd|pass|contrase"
+FILE_EXT_FILTER=""
+DISK_WHITELIST="./diskwhitelist.txt"
+PATH_WHITELIST="./pathwhitelist.txt"
+
+#############
+# FUNCTIONS #
+#############
+
+function allowedInWhiteListFile
+{
+    local allowed=0
+    keyword=$1
+    whitelistfile=$2
+
+    # Si en el fichero de la lista blanca no existe o en el aparece un asterisco, significa que todos los discos estan permitidos
+    if [[ -f $whitelistfile ]];then
+        if [[ $(grep "^\*$" $whitelistfile | wc -l) > 0 ]];then
+            echo "Hay permiso para montar todas las unidades"
+            allowed=1
+        else
+            # Buscamos el nombre del disco compartido en el fichero
+            if [[ $(grep "^$disk$" $whitelistfile | wc -l) > 0 ]];then
+                allowed=1
+            else
+                allowed=0
+            fi
+        fi
+    else
+        else "El fichero de lista blanca ($whitelistfile) no existe. NO HAY PERMISO para montar nada"
+        allowed=0
+    fi
+
+    return $allowed
+}
+
+function isPathInWhiteList
+{
+    local allowed=0
+    path=$1
+
+    allowedInWhiteListFile $path $PATH_WHITELIST
+    allowed=$?
+    return $allowed
+}
+
+function isDiskInWhiteList
+{
+    local allowed=0
+    disk=$1
+
+    allowedInWhiteListFile $disk $DISK_WHITELIST
+    allowed=$?
+    return $allowed
+}
+
+function setFindExtensionFilter
+{
+    if [[ ${#FILETYPE_BLACK_LIST} > 0 ]]
+    then
+        FILE_EXT_FILTER=$(echo $FILETYPE_BLACK_LIST | sed 's/,/" ! -iname "*./g')
+        FILE_EXT_FILTER="! -iname \"*."$FILE_EXT_FILTER"\" "
+    fi
+}
 
 ####################
 # CHECK PARAMETROS #
@@ -39,12 +108,6 @@ else
     fi
 fi
 
-# Comprobamos si ha especificado una regexp
-#if [[ "$search_regexp" -eq "" ]]
-#then
-    search_regexp="pwd|pass|contrase"
-#fi
-
 ####################
 # INIT DIRECTORIES #
 ####################
@@ -59,6 +122,7 @@ then
     fi
 fi
 
+setFindExtensionFilter
 
 # Comprobamos que existe el fichero con el listado de IP
 if [[ -f $ip_list ]]
@@ -66,98 +130,105 @@ then
     for target_ip in `cat $ip_list`
     do
         # Vaciamos ficheros de log
-        echo -n "" > $RESULT_DIR"/"$target_ip.shares.txt
-        echo -n "" > $RESULT_DIR"/"$target_ip.shares.mounted.txt
+        echo -n "" > "$RESULT_DIR/$target_ip.shares.txt"
+        echo -n "" > "$RESULT_DIR/$target_ip.shares.mounted.txt"
 
         echo "==========================="
         echo "$target_ip:"
         n_shares=0
         if [[ $null_user = 1 ]]
         then
-            n_shares=$(smbclient -L $target_ip -U "" -N | grep "Disk" | awk '{print $1}' | wc -l)
+            n_shares=$(smbclient -L $target_ip -U "" -N -g | grep "^Disk" | cut -f2 -d"|" | wc -l)
         else
-            n_shares=$(smbclient -L $target_ip -U $user%$password -W $domain | grep "Disk" | awk '{print $1}' | wc -l)
+            n_shares=$(smbclient -L $target_ip -U $user%$password -W $domain -g | grep "^Disk" | cut -f2 -d"|" | wc -l)
         fi
 
         echo "$target_ip has $n_shares shared disk."
         if [[ $n_shares > 0 ]]
         then
+            
             if [[ $null_user = 1 ]]
             then
                 echo "Listing $target_ip shares with Null user..."
-                echo $(smbclient -L $target_ip -U "" -N | grep "Disk" | awk '{print $1}') >> $target_ip.shares.txt
+                smbclient -L $target_ip -U "" -N -g | grep "^Disk" | cut -f2 -d"|" >> "$RESULT_DIR/$target_ip.shares.txt"
             else
                 echo "Listing $target_ip shares with user $domain\\$user..."
-                echo  $(smbclient -L $target_ip -U $user%$password -W $domain | grep "Disk" | awk '{print $1}') >> $target_ip.shares.txt
+                smbclient -L $target_ip -U $user%$password -W $domain -g | grep "^Disk" | cut -f2 -d"|" >> "$RESULT_DIR/$target_ip.shares.txt"
             fi
-            for share in `cat $target_ip.shares.txt`
+
+            cat "$RESULT_DIR/$target_ip.shares.txt" | while read share
+            #for share in `cat "$RESULT_DIR/$target_ip.shares.txt"`
             do 
                 # Montamos el share 
                 to_mount="//$target_ip/$share"
-                sharepath=$target_ip"_"$share
-                tmpshare=$RESULT_DIR"/"$sharepath
+                sharepath="${target_ip}_${share}"
+                tmpshare="$RESULT_DIR/$sharepath"
                 
                  # Vaciamos ficheros de shares
-                echo -n "" > $RESULT_DIR"/"$sharepath.shares.matches.txt
-                echo -n "" > $RESULT_DIR"/"$sharepath.shares.readable.txt
+                echo -n "" > "$RESULT_DIR/$sharepath.shares.matches.txt"
+                echo -n "" > "$RESULT_DIR/$sharepath.shares.readable.txt"
 
-                if [[ ! -d $tmpshare ]] 
+                if [[ ! -d "$tmpshare" ]] 
                 then
-                    mkdir -p $tmpshare
+                    mkdir -p "$tmpshare"
                 fi
                 
                 # Intentamos montar el share
                 if [[ $null_user = 1 ]]
                 then
                     echo "Mounting $to_mount with Null user..."
-                    mount -t cifs $to_mount $tmpshare -o sec=none,guest,ro #guest,ro
+                    mount -t cifs "$to_mount" "$tmpshare" -o sec=none,guest,ro
                 else
                     echo "Mounting $to_mount with user $domain\\$user..."
-                    mount -t cifs $to_mount $tmpshare -o user=$user,workgroup=$domain,password=$password,ro
+                    mount -t cifs "$to_mount" "$tmpshare" -o user=$user,workgroup=$domain,password=$password,ro
                 fi
 
                 if [[ "$?" -eq "0" ]]
                 then
                     # Hacemos busqueda y mostramos estado
-                    echo "$to_mount:OK" >> $RESULT_DIR"/"$target_ip.shares.mounted.txt
+                    echo "$to_mount:OK" >> "$RESULT_DIR/$target_ip.shares.mounted.txt"
                     echo "$to_mount was successfuly mounted. Listing files in this share..."
                     cd $tmpshare 
              
                     if [[ $FIND_READABLES == 1 ]]
                     then
                         # Buscamos cualquier fichero con permisos de lectura para cualquiera
-                        find . -type f -perm /u+r -maxdepth $FIND_DEEP >> $RESULT_DIR"/"$sharepath.shares.readable.txt
-                        n_ficheros_legibles=$(cat $RESULT_DIR"/"$sharepath.shares.readable.txt | wc -l)
+                        eval find . -maxdepth $FIND_DEEP -type f $FILE_EXT_FILTER -size -$MAX_JUICY_SEARCH_FILESIZE -perm /u+r >> "$RESULT_DIR/$sharepath.shares.readable.txt"
+                        n_ficheros_legibles=$(cat "$RESULT_DIR/$sharepath.shares.readable.txt" | wc -l)
                         echo "There are '$n_ficheros_legibles' readable files in '$to_mount'. (Maximum search deep is $FIND_DEEP)"
-                        # Si hay ficheros legibles hacemos el grep en busca de "passw|contrase"
-                            
+                        
                         if [[ $n_ficheros_legibles > 0 ]]
                         then
                             if [[ $JUICY_SEARCH == 1 ]]
                             then
-                                echo "Looking in $to_mount the expresion '$search_regexp'..."
-                                grep -iElr "$search_regexp" -r . >> $RESULT_DIR"/"$sharepath.shares.matches.txt
+                                echo "Looking in $to_mount the expresion '$SEARCH_REGEXP'..."
+                                grep -il -E "$search_regexp" --binary-files=without-match -r . >> "$RESULT_DIR/$sharepath.shares.matches.txt"
                                 # Si el grep encuentra algo devuelve 0
                                 if [[ "$?" -eq "0" ]]
                                 then
                                     echo "Matches were found in the folowing files: "
-                                    cat $RESULT_DIR"/"$sharepath.shares.matches.txt
+                                    cat "$RESULT_DIR/$sharepath.shares.matches.txt"
                                     # Si el directorio donde guardar los ficheros no existe, lo creamos
-                                    dirmatches_share=$MATCHES_DIR"/"$sharepath 
-                                    if [[ ! -d $dirmatches_share ]]
+                                    dirmatches_share="$MATCHES_DIR/$sharepath"
+                                    if [[ ! -d "$dirmatches_share" ]]
                                     then
-                                        mkdir -p $dirmatches_share
+                                        mkdir -p "$dirmatches_share"
+
                                     fi
 
                                     # Para cada fichero que concuerda, hacemos una copia si su tamanno es pequeño (< 700 kB)
-                                    for matched_file in `cat $RESULT_DIR"/"$sharepath.shares.matches.txt`
+                                    # for matched_file in `cat "$RESULT_DIR/$sharepath.shares.matches.txt"`
+                                    cat "$RESULT_DIR/$sharepath.shares.matches.txt" | while read matched_file
                                     do
-                                        if [[ $(stat -c%s "$matched_file") -lt 716800 ]]
+                                        matched_file_size=$(stat -c%s "$matched_file")
+                                        # echo "Fichero '$matched_file' con tamanno '$matched_file_size'"
+                                        
+                                        if [[ $matched_file_size < $MAX_COPY_FILE_BYTES ]]
                                         then
-                                            echo "Copying '$matched_file' to $dirmatches_share"
-                                            cp $matched_file $dirmatches_share
+                                            echo "Copying '$matched_file' to $dirmatches_share..."
+                                            cp "$matched_file" "$dirmatches_share"
                                         else
-                                            echo "Sice of $matched_file reach the size limit to automaticaly copy it. It's not copied to $dirmatches_share"
+                                            echo "Sice of '$matched_file' ($matched_file_size) reach the size limit ($MAX_COPY_FILE_BYTES) to automaticaly copy it. It's not copied to $dirmatches_share"
                                         fi
                                     done
                                 else
@@ -179,7 +250,7 @@ then
                     umount $to_mount 
                     rmdir $tmpshare
                 else
-                    echo "$to_mount:KO" >> $RESULT_DIR"/"$target_ip.shares.mounted.txt
+                    echo "$to_mount:KO" >> "$RESULT_DIR/$target_ip.shares.mounted.txt"
                     echo "$to_mount couldn't be mounted with $domain_user. Check for your permissions."
                 fi
                
