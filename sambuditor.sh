@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # Listar unidades de los shares e intenta conectar con el usuario nulo
-
 # TODO: Ya que estamos repasando todas las unidades de los discos compartidos, podriamos sacar estadisticas de los tipos de ficheros que estan almacenando los usuarios. Por informacion para presentar en las reuniones
 
 ip_list=$1
@@ -34,6 +33,27 @@ PATH_WHITELIST="./pathwhitelist.txt"
 # FUNCTIONS #
 #############
 
+function printBanner
+{
+    local b="
+  _________             ___.             .___.__  __                        ____    _______   
+ /   _____/____    _____\\_ |__  __ __  __| _/|__|/  |_  ___________  ___  _/_   |   \\   _  \\  
+ \\_____  \\\\__  \\  /     \\| __ \\|  |  \\/ __ | |  \\   __\\/  _ \\_  __ \\ \\  \\/ /|   |   /  /_\\  \\ 
+ /        \\/ __ \\|  Y Y  \\ \\_\\ \\  |  / /_/ | |  ||  | (  <_> )  | \\/  \\   / |   |   \\  \\_/   \\
+/_______  (____  /__|_|  /___  /____/\\____ | |__||__|  \\____/|__|      \\_/  |___| /\\ \\_____  /
+        \\/     \\/      \\/    \\/           \\/                                      \\/       \\/ 
+"
+
+    echo "$b"
+    echo
+    echo "##########################################################################"
+    echo "# Author: Felipe Molina (@felmoltor)                                     #"
+    echo "# Date: July 2013                                                        #"
+    echo "# License: GPLv3 (https://www.gnu.org/licenses/gpl-3.0-standalone.html)  #"
+    echo "##########################################################################"
+    echo
+}
+
 function allowedInWhiteListFile
 {
     local allowed=0
@@ -43,7 +63,7 @@ function allowedInWhiteListFile
     # Si en el fichero de la lista blanca no existe o en el aparece un asterisco, significa que todos los discos estan permitidos
     if [[ -f $whitelistfile ]];then
         if [[ $(grep "^\*$" $whitelistfile | wc -l) > 0 ]];then
-            echo "Hay permiso para montar todas las unidades"
+            echo "We have permissions to mount all shared disk/paths ('*' found in whitelist)"
             allowed=1
         else
             # Buscamos el nombre del disco compartido en el fichero
@@ -54,7 +74,7 @@ function allowedInWhiteListFile
             fi
         fi
     else
-        else "El fichero de lista blanca ($whitelistfile) no existe. NO HAY PERMISO para montar nada"
+        "White list file ($whitelistfile) does not exists. We have NO PERMISSIONS to mount anything."
         allowed=0
     fi
 
@@ -94,6 +114,9 @@ function setFindExtensionFilter
 # CHECK PARAMETROS #
 ####################
 
+printBanner
+setFindExtensionFilter
+
 if [[ "$user" = "" ]]
 then
     # Se hace con el usuario nulo
@@ -117,12 +140,10 @@ then
     mkdir -p $MATCHES_DIR
     if [[ $? -gt 0 ]]
     then
-        echo "Error. No se pudo crear el directorio de resultados en $MATCHES_DIR"
+        echo "Error. We couldn't create folder '$MATCHES_DIR' to store matched files. Check your write permissions."
         exit 1
     fi
 fi
-
-setFindExtensionFilter
 
 # Comprobamos que existe el fichero con el listado de IP
 if [[ -f $ip_list ]]
@@ -146,7 +167,6 @@ then
         echo "$target_ip has $n_shares shared disk."
         if [[ $n_shares > 0 ]]
         then
-            
             if [[ $null_user = 1 ]]
             then
                 echo "Listing $target_ip shares with Null user..."
@@ -159,7 +179,16 @@ then
             cat "$RESULT_DIR/$target_ip.shares.txt" | while read share
             #for share in `cat "$RESULT_DIR/$target_ip.shares.txt"`
             do 
-                # Montamos el share 
+            
+                # Check if this disk ($share) is in the whitelist of allowed disk to explore
+                isDiskInWhiteList $share
+                isdiskinwl=$?
+                if [[ $isdiskinwl != 1 ]];then
+                    echo "$disk is not in the whitelist file '$DISK_WHITELIST'. Skipping it..."
+                    continue
+                fi
+
+                # Mount the share
                 to_mount="//$target_ip/$share"
                 sharepath="${target_ip}_${share}"
                 tmpshare="$RESULT_DIR/$sharepath"
@@ -187,7 +216,7 @@ then
                 then
                     # Hacemos busqueda y mostramos estado
                     echo "$to_mount:OK" >> "$RESULT_DIR/$target_ip.shares.mounted.txt"
-                    echo "$to_mount was successfuly mounted. Listing files in this share..."
+                    echo "$to_mount was successfuly mounted. Listing readable files in this share..."
                     cd $tmpshare 
              
                     if [[ $FIND_READABLES == 1 ]]
@@ -201,39 +230,43 @@ then
                         then
                             if [[ $JUICY_SEARCH == 1 ]]
                             then
-                                echo "Looking in $to_mount the expresion '$SEARCH_REGEXP'..."
-                                grep -il -E "$search_regexp" --binary-files=without-match -r . >> "$RESULT_DIR/$sharepath.shares.matches.txt"
-                                # Si el grep encuentra algo devuelve 0
-                                if [[ "$?" -eq "0" ]]
-                                then
-                                    echo "Matches were found in the folowing files: "
-                                    cat "$RESULT_DIR/$sharepath.shares.matches.txt"
-                                    # Si el directorio donde guardar los ficheros no existe, lo creamos
-                                    dirmatches_share="$MATCHES_DIR/$sharepath"
-                                    if [[ ! -d "$dirmatches_share" ]]
+                                # Add a new condition to skip the paths not contained in whitelist
+                                # Find only files with matching paths in the whitelist
+                                for pathinwl in `cat $PATH_WHITELIST | sort -u`;do
+                                    echo "Looking in '$to_mount' files with matching path '$pathinwl' containing the explressions '$SEARCH_REGEXP'"
+                                    find $to_mount -type f -path "*$pathinwl*" -print -perm /u+r | xargs grep -il -E "$SEARCH_REGEXP" --binary-files=without-match >> "$RESULT_DIR/$sharepath.shares.matches.txt"
+                                    # Si el grep encuentra algo devuelve 0
+                                    if [[ "$?" -eq "0" ]]
                                     then
-                                        mkdir -p "$dirmatches_share"
-
-                                    fi
-
-                                    # Para cada fichero que concuerda, hacemos una copia si su tamanno es pequeño (< 700 kB)
-                                    # for matched_file in `cat "$RESULT_DIR/$sharepath.shares.matches.txt"`
-                                    cat "$RESULT_DIR/$sharepath.shares.matches.txt" | while read matched_file
-                                    do
-                                        matched_file_size=$(stat -c%s "$matched_file")
-                                        # echo "Fichero '$matched_file' con tamanno '$matched_file_size'"
-                                        
-                                        if [[ $matched_file_size < $MAX_COPY_FILE_BYTES ]]
+                                        echo "Matches were found in the folowing files: "
+                                        cat "$RESULT_DIR/$sharepath.shares.matches.txt"
+                                        # Si el directorio donde guardar los ficheros no existe, lo creamos
+                                        dirmatches_share="$MATCHES_DIR/$sharepath"
+                                        if [[ ! -d "$dirmatches_share" ]]
                                         then
-                                            echo "Copying '$matched_file' to $dirmatches_share..."
-                                            cp "$matched_file" "$dirmatches_share"
-                                        else
-                                            echo "Sice of '$matched_file' ($matched_file_size) reach the size limit ($MAX_COPY_FILE_BYTES) to automaticaly copy it. It's not copied to $dirmatches_share"
+                                            mkdir -p "$dirmatches_share"
+
                                         fi
-                                    done
-                                else
-                                    echo "No matches were found in $to_mount"
-                                fi
+
+                                        # Para cada fichero que concuerda, hacemos una copia si su tamanno es pequeño (< 700 kB)
+                                        # for matched_file in `cat "$RESULT_DIR/$sharepath.shares.matches.txt"`
+                                        cat "$RESULT_DIR/$sharepath.shares.matches.txt" | while read matched_file
+                                        do
+                                            matched_file_size=$(stat -c%s "$matched_file")
+                                            # echo "Fichero '$matched_file' con tamanno '$matched_file_size'"
+                                            
+                                            if [[ $matched_file_size < $MAX_COPY_FILE_BYTES ]]
+                                            then
+                                                echo "Copying '$matched_file' to $dirmatches_share..."
+                                                cp "$matched_file" "$dirmatches_share"
+                                            else
+                                                echo "Sice of '$matched_file' ($matched_file_size) reach the size limit ($MAX_COPY_FILE_BYTES) to automaticaly copy it. It's not copied to $dirmatches_share"
+                                            fi
+                                        done
+                                    else
+                                        echo "No matches were found in $to_mount"
+                                    fi    
+                                done
                             else
                                 echo "We are not doing search of 'juicy files'"
                             fi # Del Juicy Search
